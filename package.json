@@ -1,0 +1,12 @@
+{
+  "name": "bousching-live",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live-Punkte einer Kickbase-Liga als API + Handy-Seite (Cloudflare Worker oder Node)",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

@@ -1,0 +1,19 @@
+name = "bousching-live"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+LEAGUE_NAME = "BOUSCHING"
+PLAYER_BATCH = "30"
+
+# Geheimnisse NICHT hier eintragen, sondern so anlegen:
+#   npx wrangler secret put KICKBASE_EMAIL
+#   npx wrangler secret put KICKBASE_PASSWORD
+#   npx wrangler secret put ACCESS_KEY
+#   npx wrangler secret put DEBUG_KEY      (optional, schaltet /api/raw frei)
+
+# Optional: Kickbase-Token über Neustarts merken (weniger Logins)
+#   npx wrangler kv namespace create KV   -> ID unten eintragen und die drei Zeilen einkommentieren
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "HIER_DIE_ID"
