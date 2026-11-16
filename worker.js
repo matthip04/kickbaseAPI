@@ -5,20 +5,21 @@
  * Datenquelle: inoffizielle Kickbase-API v4 (Community-Doku kevinskyba/kickbase-api-doc).
  * Kickbase kann die Schnittstelle jederzeit ändern – dann hilft /api/raw beim Nachjustieren.
  *
- * Endpunkte (alle GET, bei gesetztem ACCESS_KEY immer mit ?key=...)
+ * Öffentlich (ohne Schlüssel):
  *   /                        Live-Seite fürs Handy
  *   /?demo=1                 Seite mit erfundenen Daten (ohne Kickbase)
  *   /api/live                Alles in einem JSON: Manager, Aufstellungen, Live-Punkte, Events
  *   /api/overview            Liga, Spieltag, Spiele, Manager + Aufstellungen (ohne Live-Punkte)
- *   /api/players?ids=1,2     Live-Punkte + Events einzelner Spieler (max. PLAYER_BATCH pro Aufruf)
+ *   /api/players?ids=1,2     Live-Punkte + Events aufgestellter Spieler (max. PLAYER_BATCH pro Aufruf)
+ * Intern (nur mit ?key=ACCESS_KEY, sonst 404):
  *   /api/leagues             Deine Ligen mit ID
- *   /api/raw?path=/v4/...    Kickbase-Rohdaten zum Debuggen (nur mit ?debug=DEBUG_KEY)
+ *   /api/raw?path=/v4/...    Kickbase-Rohdaten zum Debuggen (zusätzlich ?debug=DEBUG_KEY)
  *   Optional überall: ?day=N für einen anderen Spieltag.
  *
  * Einstellungen (Cloudflare: Worker → Settings → Variables and Secrets)
  *   KICKBASE_EMAIL, KICKBASE_PASSWORD  Pflicht, als Secret anlegen
  *   LEAGUE_NAME oder LEAGUE_ID         welche Liga (ohne Angabe: die erste)
- *   ACCESS_KEY                         empfohlen: Seite + API nur mit ?key=...
+ *   ACCESS_KEY                         schützt die internen Endpunkte (ohne: komplett gesperrt)
  *   DEBUG_KEY                          schaltet /api/raw frei
  *   PLAYER_BATCH                       Spieler pro /api/players-Aufruf (Standard 30)
  *   SUBREQUEST_LIMIT                   Kickbase-Aufrufe pro /api/live-Request (Standard 40, Free-Plan erlaubt 50)
@@ -264,7 +265,6 @@ async function overview(kb, env, dayParam) {
     for (const p of (sq && sq.it) || []) known[String(p.pi)] = { name: String(p.pn || '').trim(), pos: num(p.pos), teamId: str(p.tid) };
   }
 
-  const me = (await kb.session(false)).uid;
   const players = {};
   const managers = users.map((u) => {
     const lineup = (u.lp || []).map((x) => (x == null || x === '' ? null : String(x)));
@@ -273,7 +273,6 @@ async function overview(kb, env, dayParam) {
       id: String(u.i),
       name: String(u.n || u.unm || '').trim(),
       image: img(u.uim),
-      you: String(u.i) === me,
       lineup,
       official: { day: num(u.mdp), season: num(u.sp), seasonRank: num(u.spl), dayRank: num(u.mdpl) },
     };
@@ -389,9 +388,11 @@ async function playersEndpoint(kb, env, url) {
   if (!ids.length) throw new HttpError(400, 'ids fehlt, z. B. /api/players?ids=7226,8329');
   const max = batchSize(env);
   if (ids.length > max) throw new HttpError(400, 'Höchstens ' + max + ' Spieler pro Aufruf (PLAYER_BATCH).');
-  const league = await getLeague(kb, env);
-  const day = parseDay(url.searchParams.get('day')) || num((await matchdays(kb, league)).day);
-  return { day, players: await livePlayers(kb, env, ids, day), updatedAt: new Date().toISOString() };
+  // Nur Spieler, die in dieser Liga aufgestellt sind – die Seite ist öffentlich,
+  // damit niemand über deinen Account beliebige Abfragen auslösen kann.
+  const ov = await overview(kb, env, url.searchParams.get('day'));
+  const allowed = ids.filter((id) => ov.players[id]);
+  return { day: ov.day, players: await livePlayers(kb, env, allowed, ov.day), updatedAt: new Date().toISOString() };
 }
 
 // ---------------------------------------------------------------- Tabelle (für /api/live)
@@ -449,7 +450,7 @@ function standings(ov, live) {
     players.sort((a, b) => (POS_RANK[a.pos] || 5) - (POS_RANK[b.pos] || 5) || a.slot - b.slot);
     const o = m.official;
     const season = o.season == null ? null : current ? o.season - (o.day || 0) + points : o.season;
-    return { id: m.id, name: m.name, you: m.you, points, officialPoints: o.day, seasonPoints: season, played, lineupSize: size, missing, players };
+    return { id: m.id, name: m.name, points, officialPoints: o.day, seasonPoints: season, played, lineupSize: size, missing, players };
   });
   rows.sort((a, b) => b.points - a.points || (b.seasonPoints || 0) - (a.seasonPoints || 0));
   rows.forEach((r, i) => (r.rank = i > 0 && rows[i - 1].points === r.points ? rows[i - 1].rank : i + 1));
@@ -567,8 +568,9 @@ export default {
       if (path === '/favicon.ico') return new Response(null, { status: 204 });
       if (path === '/robots.txt') return new Response('User-agent: *\nDisallow: /\n', { headers: { 'content-type': 'text/plain' } });
 
-      if (!authorized(url, request, env)) {
-        return path.startsWith('/api/') ? json({ error: 'Zugriffsschlüssel fehlt oder ist falsch (?key=...).' }, 401) : html(LOCKED, 401);
+      // Seite + Live-Daten sind öffentlich. Interne Endpunkte nur mit ACCESS_KEY (ohne Key: gesperrt).
+      if (ADMIN.has(path) && (!env.ACCESS_KEY || !authorized(url, request, env))) {
+        return json({ error: 'Gibt es nicht.' }, 404);
       }
 
       const kb = new Kickbase(env);
@@ -593,20 +595,19 @@ export default {
       }
     } catch (e) {
       const status = e instanceof HttpError ? e.status : 500;
-      return json({ error: (e && e.message) || String(e) }, status);
+      const msg = (e && e.message) || String(e);
+      console.error('[' + path + '] ' + status + ': ' + msg);
+      // Öffentlich keine Details (Ligen, Login-Probleme) – die stehen in den Logs
+      if (ADMIN.has(path) || status === 400) return json({ error: msg }, status);
+      return json({ error: 'Kickbase-Daten sind gerade nicht abrufbar. Versuch es gleich nochmal.' }, status >= 500 ? 502 : status);
     }
   },
 };
 
+const ADMIN = new Set(['/api/leagues', '/api/raw']);
+
 // ---------------------------------------------------------------- Seiten
 
-const LOCKED =
-  '<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-  '<meta name="robots" content="noindex"><title>Bousching Live</title>' +
-  '<body style="font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 16px;background:#0f241b;color:#e9efe6">' +
-  '<h1 style="font-size:1.3rem">Zugriffsschlüssel fehlt</h1>' +
-  '<p>Öffne die Seite mit deinem Schlüssel, also <b>/?key=…</b> am Ende der Adresse. ' +
-  'Den Schlüssel legst du in den Worker-Einstellungen als <b>ACCESS_KEY</b> fest.</p></body></html>';
 
 // Hinweis: Im Seiten-Code keine Backticks und kein Dollar-Klammer-Muster verwenden (Template-String).
 const PAGE = String.raw`<!doctype html>
@@ -616,7 +617,7 @@ const PAGE = String.raw`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
-<meta name="theme-color" content="#0f241b">
+<meta name="theme-color" content="#0e1a2e">
 <title>Bousching Live</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -624,20 +625,20 @@ const PAGE = String.raw`<!doctype html>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=Doto:wght@900&display=swap">
 <style>
 :root{
-  --bg:#eef3ee;--surface:#ffffff;--ink:#10241b;--muted:#5b6f63;--line:#d6e1d8;--chip:#e1eae2;
-  --board:#0f241b;--board-ink:#ffc53d;--live:#9a6400;--minus:#c0392b;--plus:#1d6b45;--focus:#1f6feb;
+  --bg:#f2f4f8;--surface:#ffffff;--ink:#131c2e;--muted:#5d6779;--line:#dce1ea;--chip:#e5e9f1;
+  --board:#13294b;--board-ink:#ffe7a8;--live:#b25600;--minus:#c62f2f;--plus:#16775a;--focus:#1f5fd6;
   color-scheme:light;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:#0f241b;--surface:#163126;--ink:#e9efe6;--muted:#93a99b;--line:#24443a;--chip:#1b392e;
-    --board:#08170f;--board-ink:#ffc53d;--live:#ffc53d;--minus:#ff7a6b;--plus:#7fd3a0;--focus:#ffc53d;
+    --bg:#0e1420;--surface:#171f2e;--ink:#e9edf4;--muted:#93a0b5;--line:#263042;--chip:#1d2637;
+    --board:#1b3560;--board-ink:#ffe7a8;--live:#ffb347;--minus:#ff7d70;--plus:#6fd1a8;--focus:#8fb4ff;
     color-scheme:dark;
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0f241b;--surface:#163126;--ink:#e9efe6;--muted:#93a99b;--line:#24443a;--chip:#1b392e;
-  --board:#08170f;--board-ink:#ffc53d;--live:#ffc53d;--minus:#ff7a6b;--plus:#7fd3a0;--focus:#ffc53d;
+  --bg:#0e1420;--surface:#171f2e;--ink:#e9edf4;--muted:#93a0b5;--line:#263042;--chip:#1d2637;
+  --board:#1b3560;--board-ink:#ffe7a8;--live:#ffb347;--minus:#ff7d70;--plus:#6fd1a8;--focus:#8fb4ff;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -655,11 +656,11 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .dayline button:disabled{opacity:.25;cursor:default}
 .status{border:0;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border-radius:999px;background:var(--chip);font-size:13px;color:var(--muted);white-space:nowrap}
 .status .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
-.is-live .status .dot{background:var(--board-ink);animation:pulse 2s infinite}
+.is-live .status .dot{background:var(--live);animation:pulse 2s infinite}
 .busy .status .dot{opacity:.45}
 .status.bad{color:var(--minus)}
 .status.bad .dot{background:var(--minus);animation:none}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,197,61,.65)}70%{box-shadow:0 0 0 9px rgba(255,197,61,0)}100%{box-shadow:0 0 0 0 rgba(255,197,61,0)}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,179,71,.65)}70%{box-shadow:0 0 0 9px rgba(255,179,71,0)}100%{box-shadow:0 0 0 0 rgba(255,179,71,0)}}
 
 .demo{margin:0 0 12px;padding:10px 13px;border-radius:10px;background:var(--board);color:var(--board-ink);font-size:14px;line-height:1.35}
 .error{margin:0 0 12px;padding:10px 13px;border-radius:10px;border:1px solid var(--minus);color:var(--minus);font-size:14px}
@@ -688,7 +689,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .meta{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:13px;color:var(--muted);margin-top:2px}
 .meta .up{color:var(--plus);font-weight:700}
 .meta .down{color:var(--minus);font-weight:700}
-.board{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:30px;line-height:1;color:var(--board-ink);background:var(--board);padding:8px 10px 6px;border-radius:8px;min-width:4.2ch;text-align:right;text-shadow:0 0 8px rgba(255,197,61,.35)}
+.board{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:30px;line-height:1;color:var(--board-ink);background:var(--board);padding:8px 10px 6px;border-radius:8px;min-width:4.2ch;text-align:right;text-shadow:0 0 8px rgba(255,231,168,.35)}
 .board.neg{color:#ff8a7a;text-shadow:0 0 8px rgba(255,138,122,.3)}
 .board.flash{animation:flip 1s ease-out}
 @keyframes flip{0%{background:var(--board-ink);color:var(--board)}35%{background:var(--board-ink);color:var(--board)}100%{background:var(--board);color:var(--board-ink)}}
@@ -838,7 +839,6 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
       S.day = ov.day;
       if (!S.init) {
         S.init = true;
-        ov.managers.forEach(function (m) { if (m.you) S.openM[m.id] = true; });
       }
       render(false);
       return loadPlayers(due(ov, force), ov.day, gen);
@@ -993,7 +993,7 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
         : '<span>Aufstellung nicht sichtbar</span>';
       var head = '<button type="button" class="mrow" data-m="' + esc(r.id) + '" aria-expanded="' + open + '">' +
         '<span class="rank">' + r.rank + '</span>' +
-        '<span class="who"><span class="name">' + esc(r.name) + (r.you ? ' <span class="tag">Du</span>' : '') +
+        '<span class="who"><span class="name">' + esc(r.name) +
         '</span><span class="meta">' + meta + '</span></span>' +
         '<span class="board' + (r.points < 0 ? ' neg' : '') + (flash ? ' flash' : '') + '">' + pts(r.points) + '</span></button>';
       var body = '';

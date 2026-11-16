@@ -13,14 +13,14 @@ Live-Punkte deiner Kickbase-Liga: alle aufgestellten Spieler aller Manager mit L
    |---|---|---|
    | `KICKBASE_EMAIL` | Secret | deine Kickbase-Mail |
    | `KICKBASE_PASSWORD` | Secret | dein Kickbase-Passwort |
-   | `ACCESS_KEY` | Secret | langes Zufallswort, z. B. `posching-7f3k9q2x` |
+   | `ACCESS_KEY` | Secret | langes Zufallswort (nur für interne Endpunkte) |
    | `LEAGUE_NAME` | Text | `BOUSCHING` |
 
-5. Aufrufen: `https://bousching-live.<dein-name>.workers.dev/?key=<ACCESS_KEY>` und am Handy „Zum Home-Bildschirm“ hinzufügen.
+5. Aufrufen: `https://bousching-live.<dein-name>.workers.dev/` und am Handy „Zum Home-Bildschirm“ hinzufügen.
 
-Den Link mit `?key=…` kannst du an die Liga schicken. Ohne Key sieht niemand etwas.
+Die Seite ist öffentlich, den Link kannst du direkt an die Liga schicken. Deine Zugangsdaten sieht niemand; die internen Endpunkte `/api/leagues` und `/api/raw` gehen nur mit `?key=<ACCESS_KEY>`.
 
-**Erst testen ohne Kickbase:** `/?demo=1&key=…` zeigt die Seite mit erfundenen Daten.
+**Erst testen ohne Kickbase:** `/?demo=1` zeigt die Seite mit erfundenen Daten.
 
 ## Alternativ per Kommandozeile
 
@@ -45,7 +45,7 @@ npx wrangler deploy
 | `/api/leagues` | deine Ligen mit ID |
 | `/api/raw?path=/v4/leagues/{league}/ranking&debug=…` | Kickbase-Rohdaten, nur mit `DEBUG_KEY` |
 
-Überall `key=…` anhängen (wenn `ACCESS_KEY` gesetzt ist), optional `day=N` für einen anderen Spieltag.
+`/`, `/api/live`, `/api/overview` und `/api/players` sind öffentlich (nur Spieler, die in der Liga aufgestellt sind). `/api/leagues` und `/api/raw` brauchen `key=<ACCESS_KEY>`. Optional `day=N` für einen anderen Spieltag.
 
 ## Gut zu wissen
 
@@ -62,7 +62,7 @@ npx wrangler deploy
 |---|---|---|
 | `KICKBASE_EMAIL`, `KICKBASE_PASSWORD` | ja | Kickbase-Login |
 | `LEAGUE_NAME` oder `LEAGUE_ID` | nein | welche Liga (sonst die erste) |
-| `ACCESS_KEY` | empfohlen | Seite und API nur mit `?key=…` |
+| `ACCESS_KEY` | empfohlen | Schlüssel für die internen Endpunkte (ohne: gesperrt) |
 | `DEBUG_KEY` | nein | schaltet `/api/raw` frei |
 | `PLAYER_BATCH` | nein | Spieler pro `/api/players` (Standard 30) |
 | `SUBREQUEST_LIMIT` | nein | Kickbase-Abrufe pro `/api/live` (Standard 40) |
