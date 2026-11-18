@@ -256,7 +256,7 @@ async function overview(kb, env, dayParam) {
 
   // Kader liefern Namen + Positionen für alle aufgestellten Spieler (ändern sich selten)
   const squads = await mapLimit(users, 6, (u) =>
-    cached('sq:' + league.id + ':' + u.i, 15 * 60000, () => kb.get('/v4/leagues/' + league.id + '/managers/' + u.i + '/squad')).catch(
+    cached('sq:' + league.id + ':' + u.i, 5 * 60000, () => kb.get('/v4/leagues/' + league.id + '/managers/' + u.i + '/squad')).catch(
       () => null,
     ),
   );
@@ -266,14 +266,22 @@ async function overview(kb, env, dayParam) {
   }
 
   const players = {};
-  const managers = users.map((u) => {
+  const managers = users.map((u, i) => {
     const lineup = (u.lp || []).map((x) => (x == null || x === '' ? null : String(x)));
     for (const id of lineup) if (id) players[id] = known[id] || { name: '', pos: null, teamId: null };
+    // Bank = Kader ohne Aufstellung. Der Kader ist der aktuelle, deshalb nur für den laufenden Spieltag.
+    const inLineup = new Set(lineup.filter(Boolean));
+    const bench =
+      day === currentDay && squads[i] && squads[i].it
+        ? squads[i].it.map((p) => String(p.pi)).filter((id) => !inLineup.has(id))
+        : [];
+    for (const id of bench) players[id] = known[id];
     return {
       id: String(u.i),
       name: String(u.n || u.unm || '').trim(),
       image: img(u.uim),
       lineup,
+      bench,
       official: { day: num(u.mdp), season: num(u.sp), seasonRank: num(u.spl), dayRank: num(u.mdpl) },
     };
   });
@@ -410,47 +418,69 @@ function teamIndex(matches) {
   return t;
 }
 
+// Größter verpasster Gewinn: Bankspieler statt schwächstem Startspieler derselben Position
+function bestSwap(players, bench) {
+  let best = null;
+  for (const b of bench) {
+    if (b.state === 'upcoming' || !b.loaded) continue;
+    for (const s of players) {
+      if (s.pos !== b.pos || s.state === 'upcoming') continue;
+      const gain = b.points - s.points;
+      if (gain > 0 && (!best || gain > best.gain)) best = { in: b.name, out: s.name, gain };
+    }
+  }
+  return best;
+}
+
 function standings(ov, live) {
   const tm = teamIndex(ov.matches);
   const current = ov.day === ov.currentDay;
+  const row = (id, slot) => {
+    const meta = ov.players[id] || {};
+    const lv = live[id] && !live[id].error ? live[id] : null;
+    const teamId = (lv && lv.teamId) || meta.teamId || null;
+    const match = teamId ? tm[teamId] : null;
+    const state = later(lv && lv.state, match && match.state) || 'upcoming';
+    return {
+      id,
+      slot,
+      name: (lv && lv.name) || meta.name || '',
+      pos: POS[meta.pos] || null,
+      team: match ? (match.home.id === teamId ? match.home.sym : match.away.sym) : null,
+      points: lv ? lv.points : 0,
+      state,
+      loaded: !!lv,
+      minute: state === 'live' ? (lv && lv.minute) || (match && match.minute) || '' : '',
+      role: lv ? lv.role : null,
+      keys: lv ? lv.keys : [],
+      events: lv ? lv.events : [],
+    };
+  };
+  const byPos = (a, b) => (POS_RANK[a.pos] || 5) - (POS_RANK[b.pos] || 5) || a.slot - b.slot;
   const rows = ov.managers.map((m) => {
-    let points = 0;
-    let played = 0;
-    let size = 0;
-    let missing = 0;
     const players = [];
-    m.lineup.forEach((id, slot) => {
-      if (!id) return;
-      size++;
-      const meta = ov.players[id] || {};
-      const lv = live[id] && !live[id].error ? live[id] : null;
-      const teamId = (lv && lv.teamId) || meta.teamId || null;
-      const match = teamId ? tm[teamId] : null;
-      const state = later(lv && lv.state, match && match.state) || 'upcoming';
-      if (state !== 'upcoming') {
-        played++;
-        if (!lv) missing++;
-      }
-      const pts = lv ? lv.points : 0;
-      points += pts;
-      players.push({
-        id,
-        slot,
-        name: (lv && lv.name) || meta.name || '',
-        pos: POS[meta.pos] || null,
-        team: match ? (match.home.id === teamId ? match.home.sym : match.away.sym) : null,
-        points: pts,
-        state,
-        minute: state === 'live' ? (lv && lv.minute) || (match && match.minute) || '' : '',
-        role: lv ? lv.role : null,
-        keys: lv ? lv.keys : [],
-        events: lv ? lv.events : [],
-      });
-    });
-    players.sort((a, b) => (POS_RANK[a.pos] || 5) - (POS_RANK[b.pos] || 5) || a.slot - b.slot);
+    m.lineup.forEach((id, slot) => id && players.push(row(id, slot)));
+    players.sort(byPos);
+    const points = players.reduce((s, p) => s + p.points, 0);
+    const played = players.filter((p) => p.state !== 'upcoming').length;
+    const missing = players.filter((p) => p.state !== 'upcoming' && !p.loaded).length;
+    const bench = (m.bench || []).map((id, i) => row(id, 100 + i)).sort((a, b) => b.points - a.points);
     const o = m.official;
     const season = o.season == null ? null : current ? o.season - (o.day || 0) + points : o.season;
-    return { id: m.id, name: m.name, points, officialPoints: o.day, seasonPoints: season, played, lineupSize: size, missing, players };
+    return {
+      id: m.id,
+      name: m.name,
+      points,
+      officialPoints: o.day,
+      seasonPoints: season,
+      played,
+      lineupSize: players.length,
+      missing,
+      players,
+      bench,
+      benchPoints: bench.reduce((s, p) => s + p.points, 0),
+      bestSwap: bestSwap(players, bench),
+    };
   });
   rows.sort((a, b) => b.points - a.points || (b.seasonPoints || 0) - (a.seasonPoints || 0));
   rows.forEach((r, i) => (r.rank = i > 0 && rows[i - 1].points === r.points ? rows[i - 1].rank : i + 1));
@@ -497,6 +527,93 @@ async function liveAll(kb, env, dayParam) {
     matches: ov.matches,
     managers: standings(ov, live),
   };
+}
+
+// ---------------------------------------------------------------- Manager-Akte (Easter Egg)
+
+// Kontostand-Schätzung: Startbudget + Verkäufe − Käufe + Login-Bonus (täglich) + Punkteprämie.
+// Erfolgsprämien zeigt Kickbase nur dem eigenen Account, die fehlen bei allen gleich.
+async function managerFile(kb, env, url) {
+  const uid = String(url.searchParams.get('id') || '');
+  const league = await getLeague(kb, env);
+  const md = await matchdays(kb, league);
+  const rk = await cached('rk:' + league.id + ':' + num(md.day), 20000, () =>
+    kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: num(md.day) }),
+  );
+  const user = (rk.us || []).find((u) => String(u.i) === uid);
+  if (!user) throw new HttpError(404, 'Diesen Manager gibt es in der Liga nicht.');
+
+  return cached('mf:' + league.id + ':' + uid, 5 * 60000, async () => {
+    const info = await cached('lo:' + league.id, 3600 * 1000, () => kb.get('/v4/leagues/' + league.id + '/overview'));
+    const dash = await kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/dashboard');
+    const all = [];
+    for (let start = 0, page = 0; page < 60; page++) {
+      const t = await kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/transfer', { start });
+      const it = t.it || [];
+      if (!it.length) break;
+      all.push(...it);
+      start += it.length;
+    }
+    const transfers = all
+      .map((t) => ({
+        date: t.dt || null,
+        player: String(t.pn || '').trim(),
+        kind: Number(t.tty) === 2 ? 'sell' : 'buy',
+        price: Number(t.trp) || 0,
+        other: t.othnm ? String(t.othnm) : null,
+      }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const bought = transfers.filter((t) => t.kind === 'buy').reduce((s, t) => s + t.price, 0);
+    const sold = transfers.filter((t) => t.kind === 'sell').reduce((s, t) => s + t.price, 0);
+
+    const startBudget = num(info.b) != null ? num(info.b) : 50000000;
+    const firstTransfer = transfers.length ? Date.parse(transfers[transfers.length - 1].date) : NaN;
+    const created = Date.parse(info.dt || '');
+    const since = Number.isFinite(created) ? created : Number.isFinite(firstTransfer) ? firstTransfer : Date.now();
+    const loginDays = Math.max(1, Math.floor((Date.now() - since) / 86400000) + 1);
+    const loginBonus = Number(env.LOGIN_BONUS) || 100000;
+    const pointMoney = env.POINT_MONEY != null && env.POINT_MONEY !== '' ? Number(env.POINT_MONEY) : 1000;
+    const seasonPoints = num(dash.tp) || 0;
+    const estimate = startBudget + sold - bought + loginDays * loginBonus + seasonPoints * pointMoney;
+
+    const me = (await kb.session(false)).uid;
+    let achievements = null;
+    if (uid === me) {
+      try {
+        const a = await kb.get('/v4/leagues/' + league.id + '/user/achievements');
+        const got = (a.it || []).filter((x) => Number(x.ac) > 0);
+        achievements = got.map((x) => ({ name: String(x.n || ''), count: Number(x.ac) }));
+      } catch (_) {
+        achievements = null;
+      }
+    }
+
+    return {
+      id: uid,
+      name: String(dash.unm || user.n || '').trim(),
+      placement: num(dash.pl),
+      seasonPoints,
+      averagePoints: num(dash.ap),
+      matchdayWins: num(dash.mdw),
+      teamValue: num(dash.tv),
+      since: new Date(since).toISOString(),
+      money: {
+        start: startBudget,
+        sold,
+        bought,
+        loginDays,
+        loginBonus,
+        login: loginDays * loginBonus,
+        pointMoney,
+        points: seasonPoints * pointMoney,
+        estimate,
+      },
+      counts: { buys: transfers.filter((t) => t.kind === 'buy').length, sells: transfers.filter((t) => t.kind === 'sell').length },
+      achievements,
+      transfers: transfers.slice(0, 300),
+      updatedAt: new Date().toISOString(),
+    };
+  });
 }
 
 // ---------------------------------------------------------------- Debug
@@ -584,6 +701,8 @@ export default {
           return json(await overview(kb, env, day));
         case '/api/players':
           return json(await playersEndpoint(kb, env, url));
+        case '/api/manager':
+          return json(await managerFile(kb, env, url));
         case '/api/leagues': {
           const sel = await kb.get('/v4/leagues/selection');
           return json({ leagues: (sel.it || []).map((l) => ({ id: str(l.i), name: l.n, competitionId: str(l.cpi) })) });
@@ -642,6 +761,7 @@ const PAGE = String.raw`<!doctype html>
   color-scheme:dark;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:400 16px/1.4 "Archivo",system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
 button{font:inherit;color:inherit}
@@ -734,6 +854,38 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 
 .note{color:var(--muted);font-size:15px;padding:18px 0 0;margin:0}
 footer{color:var(--muted);font-size:12px;padding:28px 0 0}
+.meta .benchsum{color:var(--ink);font-weight:600}
+.benchhead{display:flex;justify-content:space-between;align-items:baseline;margin:2px 0 6px;padding:0 12px;font-size:13px;font-weight:700;color:var(--muted)}
+.benchhead .bsum{color:var(--ink)}
+.benchhead .bsum.neg{color:var(--minus)}
+.swap{margin:0 0 8px;padding:8px 12px;border-radius:10px;background:var(--chip);font-size:14px}
+.players.bench{opacity:.82}
+.mrow{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;position:relative}
+.mrow.charging::after{content:"";position:absolute;left:0;bottom:-1px;height:2px;width:100%;background:var(--live);transform-origin:left;animation:charge 3.5s linear forwards}
+@keyframes charge{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+body.egg-open{overflow:hidden}
+.egg{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-end;justify-content:center;background:rgba(6,10,20,.55)}
+.egg-sheet{width:100%;max-width:560px;max-height:88vh;overflow:auto;background:var(--surface);color:var(--ink);border-radius:18px 18px 0 0;padding:16px max(16px, env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));box-shadow:0 -8px 30px rgba(0,0,0,.25)}
+.egg-top{display:flex;justify-content:space-between;align-items:center;gap:12px;position:sticky;top:-16px;background:var(--surface);padding:4px 0 8px}
+.egg-top h2{margin:0;font-size:22px;font-weight:800;font-stretch:75%}
+#egg-close{border:0;background:var(--chip);width:36px;height:36px;border-radius:50%;font-size:22px;line-height:1;cursor:pointer}
+.egg-hero{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:6px 0 14px}
+.egg-label{font-size:13px;color:var(--muted)}
+.egg-money{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:34px;line-height:1;color:var(--board-ink);background:var(--board);padding:10px 12px 8px;border-radius:10px}
+.egg-money.neg{color:#ff9a8c}
+.egg h3{margin:18px 0 6px;font-size:15px}
+.egg-calc,.egg-tx{list-style:none;margin:0;padding:0}
+.egg-calc li{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.egg-calc li span:first-child{color:var(--muted);min-width:0}
+.egg-calc li span:last-child{font-weight:700;white-space:nowrap}
+.egg .plus{color:var(--plus)}
+.egg .minus{color:var(--minus)}
+.egg-note{margin:8px 0 0;font-size:13px;color:var(--muted)}
+.egg-tx li{display:grid;grid-template-columns:44px 1fr auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.tx-d{color:var(--muted);font-size:13px}
+.tx-n{min-width:0;font-weight:600}
+.tx-n small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+.egg-tx li span:last-child{font-weight:700;white-space:nowrap}
 @media (prefers-reduced-motion: reduce){*{animation:none!important}}
 </style>
 </head>
@@ -761,6 +913,12 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
   <ol class="ticker" id="ticker" role="tabpanel" aria-labelledby="tab-ticker" hidden></ol>
   <p class="note" id="note" hidden></p>
   <footer>Live-Punkte über die inoffizielle Kickbase-API. Tippe auf einen Manager für seine Elf, auf einen Spieler für alle Punkte-Ereignisse.</footer>
+  <div class="egg" id="egg" hidden role="dialog" aria-modal="true" aria-labelledby="egg-title">
+    <div class="egg-sheet">
+      <div class="egg-top"><h2 id="egg-title">Akte</h2><button type="button" id="egg-close" aria-label="Schließen">×</button></div>
+      <div id="egg-body"></div>
+    </div>
+  </div>
 </div>
 <noscript>Diese Seite braucht JavaScript.</noscript>
 <script>
@@ -809,7 +967,7 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
   }
 
   function api(path, params) {
-    if (DEMO) return Promise.resolve(Demo.api(path, params || {}));
+    if (DEMO) { try { return Promise.resolve(Demo.api(path, params || {})); } catch (e) { return Promise.reject(e); } }
     var u = new URL(path, location.href);
     Object.keys(params || {}).forEach(function (k) {
       var v = params[k];
@@ -903,32 +1061,38 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
 
   function standings() {
     var ov = S.ov, tm = teamIndex(ov.matches), current = ov.day === ov.currentDay;
+    function row(id, slot) {
+      var meta = ov.players[id] || {};
+      var lv = S.live[id] && !S.live[id].error ? S.live[id] : null;
+      var teamId = (lv && lv.teamId) || meta.teamId || null;
+      var match = teamId ? tm[teamId] : null;
+      var state = later(lv && lv.state, match && match.state) || 'upcoming';
+      return {
+        id: id, slot: slot, name: (lv && lv.name) || meta.name || ('Spieler ' + id),
+        pos: POS[meta.pos] || '', team: sym(match, teamId), points: lv ? lv.points : 0, state: state,
+        minute: (lv && lv.minute) || (match && match.minute) || '',
+        kickoff: (match && match.kickoff) || (lv && lv.kickoff) || null,
+        role: lv ? lv.role : null, keys: lv ? lv.keys : [], events: lv ? lv.events : [], loaded: !!lv
+      };
+    }
     var rows = ov.managers.map(function (m) {
-      var points = 0, played = 0, size = 0, missing = 0, players = [];
-      m.lineup.forEach(function (id, slot) {
-        if (!id) return;
-        size++;
-        var meta = ov.players[id] || {};
-        var lv = S.live[id] && !S.live[id].error ? S.live[id] : null;
-        var teamId = (lv && lv.teamId) || meta.teamId || null;
-        var match = teamId ? tm[teamId] : null;
-        var state = later(lv && lv.state, match && match.state) || 'upcoming';
-        if (state !== 'upcoming') { played++; if (!lv) missing++; }
-        var p = lv ? lv.points : 0;
-        points += p;
-        players.push({
-          id: id, slot: slot, name: (lv && lv.name) || meta.name || ('Spieler ' + id),
-          pos: POS[meta.pos] || '', team: sym(match, teamId), points: p, state: state,
-          minute: (lv && lv.minute) || (match && match.minute) || '',
-          kickoff: (match && match.kickoff) || (lv && lv.kickoff) || null,
-          role: lv ? lv.role : null, keys: lv ? lv.keys : [], events: lv ? lv.events : [], loaded: !!lv
-        });
-      });
+      var players = [];
+      m.lineup.forEach(function (id, slot) { if (id) players.push(row(id, slot)); });
       players.sort(function (a, b) { return ((POS_RANK[a.pos] || 5) - (POS_RANK[b.pos] || 5)) || (a.slot - b.slot); });
+      var points = 0, played = 0, missing = 0;
+      players.forEach(function (p) {
+        points += p.points;
+        if (p.state !== 'upcoming') { played++; if (!p.loaded) missing++; }
+      });
+      var bench = (m.bench || []).map(function (id, i) { return row(id, 100 + i); })
+        .sort(function (a, b) { return (b.points - a.points) || ((POS_RANK[a.pos] || 5) - (POS_RANK[b.pos] || 5)); });
+      var benchPlayed = bench.filter(function (p) { return p.state !== 'upcoming' && p.loaded; });
       var o = m.official || {};
       var season = o.season == null ? null : current ? o.season - (o.day || 0) + points : o.season;
-      return { id: m.id, name: m.name, you: m.you, points: points, season: season, officialRank: o.seasonRank,
-        played: played, size: size, missing: missing, players: players };
+      return { id: m.id, name: m.name, points: points, season: season, officialRank: o.seasonRank,
+        played: played, size: players.length, missing: missing, players: players, bench: bench,
+        benchPoints: benchPlayed.reduce(function (s, p) { return s + p.points; }, 0),
+        benchPlayed: benchPlayed.length, swap: bestSwap(players, bench) };
     });
     rows.sort(function (a, b) { return (b.points - a.points) || ((b.season || 0) - (a.season || 0)); });
     rows.forEach(function (r, i) { r.rank = i > 0 && rows[i - 1].points === r.points ? rows[i - 1].rank : i + 1; });
@@ -938,9 +1102,24 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
     return rows;
   }
 
+  // Größter verpasster Gewinn: Bankspieler statt schwächstem Startspieler derselben Position
+  function bestSwap(players, bench) {
+    var best = null;
+    bench.forEach(function (b) {
+      if (b.state === 'upcoming' || !b.loaded) return;
+      players.forEach(function (s) {
+        if (s.pos !== b.pos || s.state === 'upcoming') return;
+        var gain = b.points - s.points;
+        if (gain > 0 && (!best || gain > best.gain)) best = { inName: b.name, outName: s.name, gain: gain };
+      });
+    });
+    return best;
+  }
+
   // ---------------------------------------------------------- Anzeigen
 
   function render(final) {
+    if (S.press) { S.renderLater = S.renderLater || final || 'yes'; return; }
     var ov = S.ov;
     $('stamp').textContent = S.err ? (S.okAt ? 'Fehler, Stand ' + hhmm(S.okAt) : 'Fehler')
       : S.okAt ? 'Stand ' + S.okAt.toLocaleTimeString('de-DE') : 'Lädt …';
@@ -989,6 +1168,7 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
       var meta = r.size
         ? '<span>' + r.played + '/' + r.size + ' gespielt</span>' +
           (r.season != null ? '<span>Gesamt ' + pts(r.season) + ', Platz ' + r.seasonRank + trend(r) + '</span>' : '') +
+          (r.benchPlayed ? '<span class="benchsum">Bank ' + delta(r.benchPoints) + '</span>' : '') +
           (r.missing ? '<span>' + r.missing + ' laden noch</span>' : '')
         : '<span>Aufstellung nicht sichtbar</span>';
       var head = '<button type="button" class="mrow" data-m="' + esc(r.id) + '" aria-expanded="' + open + '">' +
@@ -1002,6 +1182,13 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
         body = '<ul class="players">' + r.players.map(renderPlayer).join('') +
           (empty ? '<li class="slot">' + empty + (empty === 1 ? ' Platz' : ' Plätze') + ' in der Elf leer</li>' : '') +
           (!r.size ? '<li class="slot">Keine Aufstellung sichtbar.</li>' : '') + '</ul>';
+        if (r.bench.length) {
+          body += '<div class="benchhead"><span>Auf der Bank</span><span class="bsum' + (r.benchPoints < 0 ? ' neg' : '') + '">' +
+            (r.benchPlayed ? delta(r.benchPoints) : '') + '</span></div>' +
+            (r.swap ? '<p class="swap">Mit <b>' + esc(r.swap.inName) + '</b> statt ' + esc(r.swap.outName) +
+              ' wären es <b>' + delta(r.swap.gain) + '</b> gewesen.</p>' : '') +
+            '<ul class="players bench">' + r.bench.map(renderPlayer).join('') + '</ul>';
+        }
       }
       return '<li class="mgr' + (open ? ' open' : '') + '">' + head + body + '</li>';
     }).join('');
@@ -1085,10 +1272,110 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
     $('ticker').hidden = t !== 'ticker';
   }
 
+  // ---------------------------------------------------------- 🥚 5 Sekunden auf einen Manager drücken
+
+  var HOLD = 5000;
+  function money(n) {
+    if (n == null || isNaN(n)) return '–';
+    var a = Math.abs(n), s = n < 0 ? '−' : '';
+    if (a >= 1e6) return s + (a / 1e6).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' Mio. €';
+    return s + Math.round(a).toLocaleString('de-DE') + ' €';
+  }
+  function dmy(iso) {
+    var d = new Date(iso || '');
+    return isNaN(d) ? '' : d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+  }
+  function pressEnd(fired) {
+    if (!S.press) return;
+    clearTimeout(S.press.timer);
+    clearTimeout(S.press.hint);
+    if (S.press.el) S.press.el.classList.remove('charging');
+    S.press = null;
+    if (fired) S.eggFired = true;
+    if (S.renderLater) { var f = S.renderLater === true; S.renderLater = null; render(f); }
+  }
+  document.addEventListener('pointerdown', function (e) {
+    var el = e.target.closest && e.target.closest('.mrow');
+    if (!el || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    pressEnd(false);
+    S.eggFired = false;
+    S.press = {
+      el: el, id: el.dataset.m, x: e.clientX, y: e.clientY,
+      hint: setTimeout(function () { if (S.press) S.press.el.classList.add('charging'); }, 1500),
+      timer: setTimeout(function () {
+        var id = S.press && S.press.id;
+        pressEnd(true);
+        if (navigator.vibrate) { try { navigator.vibrate([30, 40, 60]); } catch (_) {} }
+        openEgg(id);
+      }, HOLD)
+    };
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (S.press && Math.abs(e.clientX - S.press.x) + Math.abs(e.clientY - S.press.y) > 14) pressEnd(false);
+  });
+  ['pointerup', 'pointercancel'].forEach(function (t) { document.addEventListener(t, function () { pressEnd(false); }); });
+  document.addEventListener('contextmenu', function (e) { if (e.target.closest && e.target.closest('.mrow')) e.preventDefault(); });
+
+  function openEgg(id) {
+    var m = S.ov && S.ov.managers.filter(function (x) { return x.id === id; })[0];
+    $('egg-title').textContent = 'Akte ' + (m ? m.name : '');
+    $('egg-body').innerHTML = '<p class="egg-note">Lade die Akte …</p>';
+    $('egg').hidden = false;
+    document.body.classList.add('egg-open');
+    $('egg-close').focus();
+    api('/api/manager', { id: id }).then(renderEgg, function (e) {
+      $('egg-body').innerHTML = '<p class="egg-note">' + esc(e.message) + '</p>';
+    });
+  }
+  function closeEgg() {
+    $('egg').hidden = true;
+    document.body.classList.remove('egg-open');
+  }
+  function renderEgg(f) {
+    var M = f.money;
+    var line = function (label, val, cls) {
+      return '<li><span>' + label + '</span><span class="' + (cls || '') + '">' + val + '</span></li>';
+    };
+    var ach = f.achievements
+      ? f.achievements.map(function (a) { return '<li><span>' + esc(a.name) + '</span><span>' + a.count + '×</span></li>'; }).join('')
+      : '';
+    $('egg-body').innerHTML =
+      '<div class="egg-hero"><span class="egg-label">Kontostand, geschätzt</span>' +
+      '<span class="egg-money' + (M.estimate < 0 ? ' neg' : '') + '">' + money(M.estimate) + '</span></div>' +
+      '<ul class="egg-calc">' +
+        line('Startbudget', money(M.start)) +
+        line('Verkäufe (' + f.counts.sells + ')', '+' + money(M.sold), 'plus') +
+        line('Käufe (' + f.counts.buys + ')', '−' + money(M.bought), 'minus') +
+        line('Login-Bonus (' + M.loginDays + ' Tage × ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
+        line('Punkteprämie (' + pts(f.seasonPoints) + ' × ' + money(M.pointMoney) + ')', '+' + money(M.points), 'plus') +
+      '</ul>' +
+      '<p class="egg-note">Annahme: seit ' + dmy(f.since) + ' jeden Tag eingeloggt. Erfolgsprämien sind nicht drin, ' +
+        'die zeigt Kickbase nur dem Besitzer selbst.</p>' +
+      '<h3>Erfolge</h3><ul class="egg-calc">' +
+        line('Platz in der Liga', f.placement || '–') +
+        line('Spieltagssiege', f.matchdayWins == null ? '–' : f.matchdayWins) +
+        line('Saisonpunkte', pts(f.seasonPoints) + (f.averagePoints ? ' (Ø ' + pts(f.averagePoints) + ')' : '')) +
+        line('Teamwert', money(f.teamValue)) + ach +
+      '</ul>' +
+      '<h3>Transfers</h3>' +
+      (f.transfers.length ? '<ol class="egg-tx">' + f.transfers.map(function (t) {
+        var buy = t.kind === 'buy';
+        return '<li><span class="tx-d">' + dmy(t.date) + '</span><span class="tx-n">' + esc(t.player) +
+          '<small>' + (buy ? 'gekauft' : 'verkauft') + (t.other ? (buy ? ' von ' : ' an ') + esc(t.other) : '') + '</small></span>' +
+          '<span class="' + (buy ? 'minus' : 'plus') + '">' + (buy ? '−' : '+') + money(t.price) + '</span></li>';
+      }).join('') + '</ol>' : '<p class="egg-note">Noch keine Transfers.</p>');
+  }
+
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('egg').hidden) closeEgg(); });
+
   document.addEventListener('click', function (e) {
+    if (e.target.id === 'egg' || (e.target.closest && e.target.closest('#egg-close'))) { closeEgg(); return; }
     var el = e.target.closest('button');
     if (!el) return;
-    if (el.dataset.m) { S.openM[el.dataset.m] = !S.openM[el.dataset.m]; render(false); return; }
+    if (el.dataset.m) {
+      if (S.eggFired) { S.eggFired = false; return; }
+      S.openM[el.dataset.m] = !S.openM[el.dataset.m]; render(false); return;
+    }
     if (el.dataset.p) { S.openP[el.dataset.p] = !S.openP[el.dataset.p]; render(false); return; }
     if (el.id === 'tab-table') return setTab('table');
     if (el.id === 'tab-ticker') return setTab('ticker');
@@ -1182,8 +1469,14 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
         live[id] = player(id, meta[id], byTeam[club]);
         return id;
       });
+      var bench = [2, 3, 4, 1].map(function (pos) {
+        var id = String(n++), club = pick(CLUBS);
+        meta[id] = { name: pick(SUR), pos: pos, teamId: club };
+        live[id] = player(id, meta[id], byTeam[club]);
+        return id;
+      });
       var doneDay = lineup.reduce(function (s, id) { return s + (id && live[id].state === 'done' ? live[id].points : 0); }, 0);
-      return { id: 'u' + mi, name: name, image: null, you: mi === 4, lineup: lineup,
+      return { id: 'u' + mi, name: name, image: null, lineup: lineup, bench: bench,
         official: { day: doneDay, season: int(3900, 6300) + doneDay, seasonRank: null, dayRank: null } };
     });
     matches.forEach(function (m) {
@@ -1204,6 +1497,25 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
           var out = {};
           String(params.ids || '').split(',').forEach(function (id) { if (live[id]) out[id] = live[id]; });
           return copy({ day: 11, players: out });
+        }
+        if (path === '/api/manager') {
+          var mg = managers.filter(function (x) { return x.id === params.id; })[0];
+          if (!mg) throw new Error('Diesen Manager gibt es nicht.');
+          var tx = [], t = Date.now();
+          for (var k = 0; k < 14; k++) {
+            t -= int(4, 60) * 3600000;
+            var buy = rnd() < 0.55, other = rnd() < 0.3 ? pick(MGRS.filter(function (x) { return x !== mg.name; })) : null;
+            tx.push({ date: new Date(t).toISOString(), player: pick(SUR), kind: buy ? 'buy' : 'sell', price: int(5, 300) * 100000, other: other });
+          }
+          var bought = tx.filter(function (x) { return x.kind === 'buy'; }).reduce(function (a, x) { return a + x.price; }, 0);
+          var sold = tx.filter(function (x) { return x.kind === 'sell'; }).reduce(function (a, x) { return a + x.price; }, 0);
+          var since = new Date(Date.now() - 60 * 86400000).toISOString(), sp = mg.official.season;
+          var M = { start: 50000000, sold: sold, bought: bought, loginDays: 61, loginBonus: 100000, login: 6100000, pointMoney: 1000, points: sp * 1000 };
+          M.estimate = M.start + sold - bought + M.login + M.points;
+          return copy({ id: mg.id, name: mg.name, placement: mg.official.seasonRank, seasonPoints: sp, averagePoints: Math.round(sp / 10),
+            matchdayWins: int(0, 3), teamValue: int(150, 300) * 1000000, since: since, money: M,
+            counts: { buys: tx.filter(function (x) { return x.kind === 'buy'; }).length, sells: tx.filter(function (x) { return x.kind === 'sell'; }).length },
+            achievements: null, transfers: tx });
         }
         return {};
       }

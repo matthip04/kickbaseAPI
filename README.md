@@ -42,6 +42,7 @@ npx wrangler deploy
 | `/api/live` | alles als ein JSON: Manager sortiert nach Live-Punkten, je Spieler Punkte, Status, Minute, Key-Events und Einzel-Ereignisse |
 | `/api/overview` | Liga, Spieltag, Spiele, Manager + Aufstellungen (ohne Punkte) |
 | `/api/players?ids=7226,8329` | Live-Daten einzelner Spieler (max. 30 pro Aufruf) |
+| `/api/manager?id=…` | Manager-Akte: Transfers, Erfolge, geschätzter Kontostand (Easter Egg: 5 s auf einen Manager drücken) |
 | `/api/leagues` | deine Ligen mit ID |
 | `/api/raw?path=/v4/leagues/{league}/ranking&debug=…` | Kickbase-Rohdaten, nur mit `DEBUG_KEY` |
 
@@ -64,6 +65,8 @@ npx wrangler deploy
 | `LEAGUE_NAME` oder `LEAGUE_ID` | nein | welche Liga (sonst die erste) |
 | `ACCESS_KEY` | empfohlen | Schlüssel für die internen Endpunkte (ohne: gesperrt) |
 | `DEBUG_KEY` | nein | schaltet `/api/raw` frei |
+| `LOGIN_BONUS` | nein | Login-Bonus pro Tag für die Kontostand-Schätzung (Standard 100000) |
+| `POINT_MONEY` | nein | Euro pro Saisonpunkt für die Schätzung (Standard 1000, 0 = aus) |
 | `PLAYER_BATCH` | nein | Spieler pro `/api/players` (Standard 30) |
 | `SUBREQUEST_LIMIT` | nein | Kickbase-Abrufe pro `/api/live` (Standard 40) |
 | KV-Binding `KV` | nein | merkt sich das Kickbase-Token über Neustarts (weniger Logins) |
