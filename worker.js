@@ -688,8 +688,12 @@ async function ledger(kb, env, league, uid) {
 
   add(since, 'start', 'Startbudget', start);
   for (const x of txs) add(Date.parse(x.date), x.kind, x.player, x.kind === 'sell' ? x.price : -x.price);
-  // Login-Bonus steigt mit der Anzahl Logins: 10.000 €, 20.000 €, … ab dem 10. Login 100.000 € pro Tag
-  for (let t = since, k = 1; t <= now && k < 1000; t += 86400000, k++) add(t, 'login', 'Login-Bonus', Math.min(k, 10) * (loginBonus / 10));
+  // Login-Bonus: Die Login-Serie zählt pro Kickbase-Account, nicht pro Liga. Wer schon vorher gespielt hat,
+  // bekommt ab Ligastart sofort 100.000 €. Nur ein neuer Account startet mit 10.000 €, 20.000 €, … (LOGIN_RAMP=1).
+  const ramp = String(env.LOGIN_RAMP || '') === '1';
+  for (let t = since, k = 1; t <= now && k < 1000; t += 86400000, k++) {
+    add(t, 'login', 'Login-Bonus', ramp ? Math.min(k, 10) * (loginBonus / 10) : loginBonus);
+  }
 
   // Spieltage der Saison (nur abgeschlossene, an denen die Liga schon lief)
   const season = (perf.it && perf.it[0] && perf.it[0].it) || [];
@@ -1590,7 +1594,7 @@ body.egg-open{overflow:hidden}
              : line('Startbudget', money(M.start))) +
         line('Verkäufe (' + f.counts.sells + ')', '+' + money(M.sold), 'plus') +
         line('Käufe (' + f.counts.buys + ')', '−' + money(M.bought), 'minus') +
-        line('Login-Bonus (' + M.loginDays + ' Tage, ab Tag 10 je ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
+        line('Login-Bonus (' + M.loginDays + ' Tage × ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
         line('Punkteprämie (' + money(M.pointMoney) + ' pro Punkt)', signed(M.points), M.points < 0 ? 'minus' : 'plus') +
         line('Erfolgsprämien', '+' + money(M.achievements), 'plus') +
       '</ul>' +
