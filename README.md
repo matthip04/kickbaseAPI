@@ -43,6 +43,7 @@ npx wrangler deploy
 | `/api/overview` | Liga, Spieltag, Spiele, Manager + Aufstellungen (ohne Punkte) |
 | `/api/players?ids=7226,8329` | Live-Daten einzelner Spieler (max. 30 pro Aufruf) |
 | `/api/manager?id=…` | Manager-Akte: Transfers, Erfolge, geschätzter Kontostand (Easter Egg: 5 s auf einen Manager drücken) |
+| `POST /api/calibrate` | Kontostand-Korrektur `{"id":"…","amount":-47248029,"at":"2026-11-18T15:00:00Z"}` mit Header `x-access-key` (`amount: null` löscht) |
 | `/api/leagues` | deine Ligen mit ID |
 | `/api/raw?path=/v4/leagues/{league}/ranking&debug=…` | Kickbase-Rohdaten, nur mit `DEBUG_KEY` |
 

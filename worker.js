@@ -530,22 +530,47 @@ async function liveAll(kb, env, dayParam) {
 }
 
 // ---------------------------------------------------------------- Manager-Akte (Easter Egg)
+//
+// Kontostand = Buchungsliste mit Datum: Startbudget, Transfers, täglicher Login-Bonus,
+// Punkteprämie pro Spieltag und Erfolgsprämien. Erfolge rechnen wir aus öffentlichen Daten nach
+// (Bedingungen + Prämien aus /user/achievements, geprüft gegen die echten Erfolge des eigenen Accounts).
+// Mit einer Korrektur ("Stand am Tag X war Y €") wird ab dort nur noch weitergerechnet.
 
-// Kontostand-Schätzung: Startbudget + Verkäufe − Käufe + Login-Bonus (täglich) + Punkteprämie.
-// Erfolgsprämien zeigt Kickbase nur dem eigenen Account, die fehlen bei allen gleich.
-async function managerFile(kb, env, url) {
-  const uid = String(url.searchParams.get('id') || '');
-  const league = await getLeague(kb, env);
-  const md = await matchdays(kb, league);
-  const rk = await cached('rk:' + league.id + ':' + num(md.day), 20000, () =>
-    kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: num(md.day) }),
-  );
-  const user = (rk.us || []).find((u) => String(u.i) === uid);
-  if (!user) throw new HttpError(404, 'Diesen Manager gibt es in der Liga nicht.');
+const M = 1000000;
+const ACH = {
+  dayWin: { n: 'Spieltagssieger', er: 1 * M },
+  dayWinTiers: [[3, 'Spieltagssieger Bronze', 0.5 * M], [5, 'Spieltagssieger Silber', 1 * M], [10, 'Spieltagssieger Gold', 1.5 * M], [25, 'The Special One', 2 * M]],
+  dayPts: [[500, 'Spieltagspunkte Bronze', 0.1 * M, false], [1000, 'Spieltagspunkte Silber', 0.25 * M, true], [1500, 'Spieltagspunkte Gold', 1 * M, true], [2000, 'Jahrhundertspiel', 2 * M, true]],
+  seasonPts: [[1000, 'Saisonpunkte Bronze', 0.1 * M], [5000, 'Saisonpunkte Silber', 0.25 * M], [15000, 'Saisonpunkte Gold', 0.5 * M], [30000, 'Saisonpunkte Platin', 1 * M], [40000, 'Weltpokalsieger', 2 * M]],
+  topPlayer: [[200, 'Topscorer', 0.1 * M], [300, 'Matchwinner', 0.5 * M], [400, 'Weltklasse', 1 * M], [500, 'Fussballgott', 2 * M]],
+  teamValue: [[125 * M, 'Mannschaftswert Bronze', 0.1 * M], [150 * M, 'Mannschaftswert Silber', 0.25 * M], [200 * M, 'Mannschaftswert Gold', 0.5 * M], [250 * M, 'Mannschaftswert Platin', 1 * M], [350 * M, 'Die Galaktischen', 2 * M]],
+  transfers: [[1, 'Erster Deal', 0.1 * M], [50, 'Transferkönig Bronze', 0.25 * M], [250, 'Transferkönig Silber', 0.5 * M], [500, 'Transferkönig Gold', 1 * M], [1000, 'F. Magath', 2 * M]],
+  leagueSize: [[3, 'Kreisliga', 1 * M], [6, 'Regionalliga', 1 * M], [12, '2. Liga', 1 * M], [18, '1. Liga', 1 * M]],
+  firstProfit: [1 * M, 'Glückliches Händchen', 0.1 * M],
+  profit: [[3 * M, 'Bronzenes Händchen', 0.25 * M], [5 * M, 'Silbernes Händchen', 0.5 * M], [10 * M, 'Goldenes Händchen', 1 * M], [25 * M, 'Königstransfer', 2 * M]],
+  mvp: { n: 'MVP', er: 1 * M },
+  goals: { n: 'Tormaschine', er: 0.25 * M },
+  longBench: [25, 'Lange Bank', 0.1 * M],
+  panini: { n: 'Panini', er: 0.1 * M },
+};
+const LONG = 7 * 24 * 3600 * 1000;
 
-  return cached('mf:' + league.id + ':' + uid, 5 * 60000, async () => {
-    const info = await cached('lo:' + league.id, 3600 * 1000, () => kb.get('/v4/leagues/' + league.id + '/overview'));
-    const dash = await kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/dashboard');
+function mdGroups(md) {
+  const out = {};
+  for (const g of md.it || []) {
+    const ms = (g.it || []).map(normMatch);
+    const kick = ms.map((m) => Date.parse(m.kickoff || '')).filter(Number.isFinite);
+    out[Number(g.day)] = {
+      done: ms.length > 0 && ms.every((m) => m.state === 'done'),
+      end: kick.length ? Math.max(...kick) + 2.5 * 3600 * 1000 : null,
+      teams: [...new Set(ms.flatMap((m) => [m.home.id, m.away.id]).filter(Boolean))],
+    };
+  }
+  return out;
+}
+
+function transfersOf(kb, league, uid) {
+  return cached('tx:' + league.id + ':' + uid, 5 * 60000, async () => {
     const all = [];
     for (let start = 0, page = 0; page < 60; page++) {
       const t = await kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/transfer', { start });
@@ -554,66 +579,269 @@ async function managerFile(kb, env, url) {
       all.push(...it);
       start += it.length;
     }
-    const transfers = all
+    return all
       .map((t) => ({
         date: t.dt || null,
+        pid: String(t.pi),
         player: String(t.pn || '').trim(),
         kind: Number(t.tty) === 2 ? 'sell' : 'buy',
         price: Number(t.trp) || 0,
         other: t.othnm ? String(t.othnm) : null,
       }))
-      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
-    const bought = transfers.filter((t) => t.kind === 'buy').reduce((s, t) => s + t.price, 0);
-    const sold = transfers.filter((t) => t.kind === 'sell').reduce((s, t) => s + t.price, 0);
+      .filter((t) => t.date)
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  });
+}
 
-    const startBudget = num(info.b) != null ? num(info.b) : 50000000;
-    const firstTransfer = transfers.length ? Date.parse(transfers[transfers.length - 1].date) : NaN;
-    const created = Date.parse(info.dt || '');
-    const since = Number.isFinite(created) ? created : Number.isFinite(firstTransfer) ? firstTransfer : Date.now();
-    const loginDays = Math.max(1, Math.floor((Date.now() - since) / 86400000) + 1);
-    const loginBonus = Number(env.LOGIN_BONUS) || 100000;
-    const pointMoney = env.POINT_MONEY != null && env.POINT_MONEY !== '' ? Number(env.POINT_MONEY) : 1000;
-    const seasonPoints = num(dash.tp) || 0;
-    const estimate = startBudget + sold - bought + loginDays * loginBonus + seasonPoints * pointMoney;
-
-    const me = (await kb.session(false)).uid;
-    let achievements = null;
-    if (uid === me) {
-      try {
-        const a = await kb.get('/v4/leagues/' + league.id + '/user/achievements');
-        const got = (a.it || []).filter((x) => Number(x.ac) > 0);
-        achievements = got.map((x) => ({ name: String(x.n || ''), count: Number(x.ac) }));
-      } catch (_) {
-        achievements = null;
+// Pro abgeschlossenem Spieltag: bester Aufstellungsspieler + Tore je Manager, stärkster Spieler der Bundesliga
+function dayHistory(kb, league, day, group) {
+  return cached('hd:' + league.id + ':' + day, LONG, async () => {
+    const rk = await kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: day });
+    const byUser = {};
+    for (const u of rk.us || []) {
+      const ids = (u.lp || []).filter((x) => x != null && x !== '').map(String);
+      const stats = await mapLimit(ids, 6, (id) =>
+        cached(pcKey(league, day, id), LONG, () =>
+          kb.get('/v4/competitions/' + league.cid + '/playercenter/' + id, { dayNumber: day, leagueId: league.id }),
+        ).then(
+          (pc) => {
+            const ev = (pc.events || []).filter((e) => e.cei == null);
+            const cancelled = new Set((pc.events || []).filter((e) => e.cei != null).map((e) => String(e.cei)));
+            return { p: Number(pc.p) || 0, goals: ev.filter((e) => Number(e.ke) === 1 && !cancelled.has(String(e.ei))).length };
+          },
+          () => ({ p: 0, goals: 0 }),
+        ),
+      );
+      byUser[String(u.i)] = {
+        best: stats.reduce((m, s) => Math.max(m, s.p), 0),
+        goals: stats.reduce((m, s) => m + s.goals, 0),
+      };
+    }
+    let top = { p: -1, ids: [] };
+    const teams = await mapLimit(group.teams, 6, (tid) =>
+      kb.get('/v4/competitions/' + league.cid + '/teams/' + tid + '/teamcenter', { dayNumber: day }).catch(() => null),
+    );
+    for (const t of teams) {
+      for (const p of (t && t.it) || []) {
+        const pts = Number(p.p) || 0;
+        if (pts > top.p) top = { p: pts, ids: [String(p.i)] };
+        else if (pts === top.p) top.ids.push(String(p.i));
       }
     }
+    return { byUser, top };
+  });
+}
 
+// Hatte der Manager den Spieler zum Zeitpunkt t im Kader? (aus seinen Transfers + aktuellem Kader)
+function owned(txs, squadIds, pid, t) {
+  const mine = txs.filter((x) => x.pid === pid);
+  const before = mine.filter((x) => Date.parse(x.date) <= t);
+  if (before.length) return before[before.length - 1].kind === 'buy';
+  const after = mine.find((x) => Date.parse(x.date) > t);
+  if (after) return after.kind === 'sell';
+  return squadIds.has(pid);
+}
+
+async function calibrations(env) {
+  try {
+    if (env.STORE) return (await env.STORE.get('calibrations')) || {};
+    if (env.KV) return (await env.KV.get('calibrations', 'json')) || {};
+  } catch (_) {
+    // egal
+  }
+  return memo.get('calibrations-mem') ? memo.get('calibrations-mem').val : {};
+}
+
+async function saveCalibrations(env, data) {
+  if (env.STORE) return env.STORE.put('calibrations', data);
+  if (env.KV) return env.KV.put('calibrations', JSON.stringify(data));
+  memo.set('calibrations-mem', { val: data, exp: Infinity });
+}
+
+async function ledger(kb, env, league, uid) {
+  const md = await matchdays(kb, league);
+  const groups = mdGroups(md);
+  const info = await cached('lo:' + league.id, 3600 * 1000, () => kb.get('/v4/leagues/' + league.id + '/overview'));
+  const rk = await cached('rk:' + league.id + ':' + num(md.day), 20000, () =>
+    kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: num(md.day) }),
+  );
+  const users = rk.us || [];
+  const user = users.find((u) => String(u.i) === uid);
+  if (!user) throw new HttpError(404, 'Diesen Manager gibt es in der Liga nicht.');
+
+  const [dash, perf, txs, sq] = await Promise.all([
+    cached('dash:' + league.id + ':' + uid, 5 * 60000, () => kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/dashboard')),
+    cached('perf:' + league.id + ':' + uid, 5 * 60000, () => kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/performance')),
+    transfersOf(kb, league, uid),
+    cached('sq:' + league.id + ':' + uid, 5 * 60000, () => kb.get('/v4/leagues/' + league.id + '/managers/' + uid + '/squad')).catch(() => ({ it: [] })),
+  ]);
+  const squadIds = new Set((sq.it || []).map((p) => String(p.pi)));
+
+  const created = Date.parse(info.dt || '');
+  const since = Number.isFinite(created) ? created : txs.length ? Date.parse(txs[0].date) : Date.now();
+  const start = num(info.b) != null ? num(info.b) : 50 * M;
+  const loginBonus = Number(env.LOGIN_BONUS) || 100000;
+  const pointMoney = env.POINT_MONEY != null && env.POINT_MONEY !== '' ? Number(env.POINT_MONEY) : 1000;
+  const now = Date.now();
+  const E = []; // { t, cat, label, amount }
+  const add = (t, cat, label, amount) => amount && E.push({ t, cat, label, amount });
+
+  add(since, 'start', 'Startbudget', start);
+  for (const x of txs) add(Date.parse(x.date), x.kind, x.player, x.kind === 'sell' ? x.price : -x.price);
+  for (let t = since, k = 0; t <= now && k < 1000; t += 86400000, k++) add(t, 'login', 'Login-Bonus', loginBonus);
+
+  // Spieltage der Saison (nur abgeschlossene, an denen die Liga schon lief)
+  const season = (perf.it && perf.it[0] && perf.it[0].it) || [];
+  const days = season
+    .filter((d) => groups[d.day] && groups[d.day].done && groups[d.day].end && groups[d.day].end > since)
+    .map((d) => ({ day: Number(d.day), pts: Number(d.mdp) || 0, win: !!d.tw, end: groups[d.day].end }))
+    .sort((a, b) => a.day - b.day);
+
+  let wins = 0;
+  let total = 0;
+  const once = new Set();
+  const ach = (t, name, er, repeat) => {
+    if (!repeat) {
+      if (once.has(name)) return;
+      once.add(name);
+    }
+    add(t, 'ach', name, er);
+  };
+  for (const [min, name, er] of ACH.leagueSize) if (users.length >= min) ach(since, name, er, false);
+  if (user.uim) ach(since, ACH.panini.n, ACH.panini.er, false);
+
+  const histories = {};
+  await mapLimit(days, 2, async (d) => {
+    histories[d.day] = await dayHistory(kb, league, d.day, groups[d.day]).catch(() => null);
+  });
+  for (const d of days) {
+    add(d.end, 'points', 'Punkteprämie Spieltag ' + d.day, d.pts * pointMoney);
+    if (d.win) {
+      wins++;
+      ach(d.end, ACH.dayWin.n, ACH.dayWin.er, true);
+      for (const [min, name, er] of ACH.dayWinTiers) if (wins >= min) ach(d.end, name, er, false);
+    }
+    for (const [min, name, er, rep] of ACH.dayPts) if (d.pts >= min) ach(d.end, name, er, rep);
+    total += d.pts;
+    for (const [min, name, er] of ACH.seasonPts) if (total >= min) ach(d.end, name, er, false);
+    const h = histories[d.day];
+    if (h) {
+      const mine = h.byUser[uid];
+      if (mine) {
+        for (const [min, name, er] of ACH.topPlayer) if (mine.best >= min) ach(d.end, name, er, true);
+        const others = Object.entries(h.byUser).filter(([id]) => id !== uid).map(([, s]) => s.goals);
+        if (mine.goals > 0 && others.every((g) => mine.goals > g)) ach(d.end, ACH.goals.n, ACH.goals.er, true);
+      }
+      if (h.top.ids.some((pid) => owned(txs, squadIds, pid, d.end))) ach(d.end, ACH.mvp.n, ACH.mvp.er, true);
+    }
+  }
+
+  // Transfer-Anzahl und Gewinne mit einem Spieler (nur Markt, keine Deals unter Managern)
+  const lastBuy = {};
+  txs.forEach((x, i) => {
+    const t = Date.parse(x.date);
+    for (const [min, name, er] of ACH.transfers) if (i + 1 >= min) ach(t, name, er, false);
+    if (x.kind === 'buy') lastBuy[x.pid] = x;
+    else {
+      const b = lastBuy[x.pid];
+      delete lastBuy[x.pid];
+      if (!b || b.other || x.other) return;
+      const gain = x.price - b.price;
+      if (gain >= ACH.firstProfit[0]) ach(t, ACH.firstProfit[1], ACH.firstProfit[2], false);
+      let tier = null;
+      for (const tr of ACH.profit) if (gain >= tr[0]) tier = tr;
+      if (tier) ach(t, tier[1], tier[2], true);
+    }
+  });
+
+  // Teamwert und Kadergröße kennen wir nur aktuell – Zeitpunkt unbekannt, zählen vor einer Korrektur
+  const tv = num(dash.tv) || 0;
+  for (const [min, name, er] of ACH.teamValue) if (tv >= min) add(null, 'ach', name, er);
+  if (squadIds.size >= ACH.longBench[0]) add(null, 'ach', ACH.longBench[1], ACH.longBench[2]);
+
+  return { dash, user, since, start, loginBonus, pointMoney, txs, events: E, wins, now };
+}
+
+async function managerFile(kb, env, url) {
+  const uid = String(url.searchParams.get('id') || '');
+  const league = await getLeague(kb, env);
+  return cached('mf:' + league.id + ':' + uid, 5 * 60000, async () => {
+    const L = await ledger(kb, env, league, uid);
+    const cal = (await calibrations(env))[uid] || null;
+    const calT = cal ? Date.parse(cal.at) : null;
+    // Mit Korrektur: nur Buchungen danach. Ereignisse ohne Zeitpunkt (Teamwert) stecken dann im korrigierten Stand.
+    const used = L.events.filter((e) => (calT == null ? true : e.t != null && e.t > calT));
+    const sum = (cat) => used.filter((e) => e.cat === cat).reduce((s, e) => s + e.amount, 0);
+    const count = (cat) => used.filter((e) => e.cat === cat).length;
+    const achList = {};
+    for (const e of used.filter((x) => x.cat === 'ach')) {
+      achList[e.label] = achList[e.label] || { name: e.label, count: 0, amount: 0 };
+      achList[e.label].count++;
+      achList[e.label].amount += e.amount;
+    }
+    const base = cal ? Number(cal.amount) : 0;
+    const estimate = base + used.reduce((s, e) => s + e.amount, 0);
+    const d = L.dash;
     return {
       id: uid,
-      name: String(dash.unm || user.n || '').trim(),
-      placement: num(dash.pl),
-      seasonPoints,
-      averagePoints: num(dash.ap),
-      matchdayWins: num(dash.mdw),
-      teamValue: num(dash.tv),
-      since: new Date(since).toISOString(),
+      name: String(d.unm || L.user.n || '').trim(),
+      placement: num(d.pl),
+      seasonPoints: num(d.tp),
+      averagePoints: num(d.ap),
+      matchdayWins: num(d.mdw),
+      teamValue: num(d.tv),
+      since: new Date(L.since).toISOString(),
+      calibration: cal,
       money: {
-        start: startBudget,
-        sold,
-        bought,
-        loginDays,
-        loginBonus,
-        login: loginDays * loginBonus,
-        pointMoney,
-        points: seasonPoints * pointMoney,
+        start: sum('start'),
+        sold: sum('sell'),
+        bought: -sum('buy'),
+        loginDays: count('login'),
+        loginBonus: L.loginBonus,
+        login: sum('login'),
+        pointMoney: L.pointMoney,
+        points: sum('points'),
+        achievements: sum('ach'),
         estimate,
       },
-      counts: { buys: transfers.filter((t) => t.kind === 'buy').length, sells: transfers.filter((t) => t.kind === 'sell').length },
-      achievements,
-      transfers: transfers.slice(0, 300),
+      counts: { buys: count('buy'), sells: count('sell') },
+      achievements: Object.values(achList).sort((a, b) => b.amount - a.amount),
+      transfers: L.txs
+        .slice()
+        .reverse()
+        .slice(0, 300)
+        .map((x) => ({ date: x.date, player: x.player, kind: x.kind, price: x.price, other: x.other })),
       updatedAt: new Date().toISOString(),
     };
   });
+}
+
+async function calibrate(kb, env, request) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch (_) {
+    throw new HttpError(400, 'Erwarte JSON: {"id":"…","amount":-12345678}');
+  }
+  const uid = String(body.id || '');
+  const league = await getLeague(kb, env);
+  const md = await matchdays(kb, league);
+  const rk = await cached('rk:' + league.id + ':' + num(md.day), 20000, () =>
+    kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: num(md.day) }),
+  );
+  if (!(rk.us || []).some((u) => String(u.i) === uid)) throw new HttpError(400, 'Diesen Manager gibt es in der Liga nicht.');
+  const all = await calibrations(env);
+  if (body.amount == null || body.amount === '') delete all[uid];
+  else {
+    const amount = Math.round(Number(body.amount));
+    if (!Number.isFinite(amount) || Math.abs(amount) > 2e9) throw new HttpError(400, 'Betrag ungültig.');
+    const at = body.at ? new Date(body.at) : new Date();
+    if (isNaN(at) || at.getTime() > Date.now() + 60000) throw new HttpError(400, 'Zeitpunkt ungültig.');
+    all[uid] = { amount, at: at.toISOString() };
+  }
+  await saveCalibrations(env, all);
+  memo.delete('mf:' + league.id + ':' + uid);
+  return { ok: true, calibration: all[uid] || null };
 }
 
 // ---------------------------------------------------------------- Debug
@@ -678,8 +906,12 @@ export default {
       if (request.method === 'OPTIONS') {
         return new Response(null, {
           status: 204,
-          headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-access-key' },
+          headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-access-key, content-type', 'access-control-allow-methods': 'GET, POST' },
         });
+      }
+      if (path === '/api/calibrate' && request.method === 'POST') {
+        if (!env.ACCESS_KEY || !authorized(url, request, env)) return json({ error: 'Schlüssel falsch.' }, 403);
+        return json(await calibrate(new Kickbase(env), env, request));
       }
       if (request.method !== 'GET' && request.method !== 'HEAD') return json({ error: 'Nur GET.' }, 405);
       if (path === '/favicon.ico') return new Response(null, { status: 204 });
@@ -717,7 +949,7 @@ export default {
       const msg = (e && e.message) || String(e);
       console.error('[' + path + '] ' + status + ': ' + msg);
       // Öffentlich keine Details (Ligen, Login-Probleme) – die stehen in den Logs
-      if (ADMIN.has(path) || status === 400) return json({ error: msg }, status);
+      if (ADMIN.has(path) || path === '/api/calibrate' || status === 400) return json({ error: msg }, status);
       return json({ error: 'Kickbase-Daten sind gerade nicht abrufbar. Versuch es gleich nochmal.' }, status >= 500 ? 502 : status);
     }
   },
@@ -861,8 +1093,6 @@ footer{color:var(--muted);font-size:12px;padding:28px 0 0}
 .swap{margin:0 0 8px;padding:8px 12px;border-radius:10px;background:var(--chip);font-size:14px}
 .players.bench{opacity:.82}
 .mrow{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;position:relative}
-.mrow.charging::after{content:"";position:absolute;left:0;bottom:-1px;height:2px;width:100%;background:var(--live);transform-origin:left;animation:charge 3.5s linear forwards}
-@keyframes charge{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 body.egg-open{overflow:hidden}
 .egg{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-end;justify-content:center;background:rgba(6,10,20,.55)}
 .egg-sheet{width:100%;max-width:560px;max-height:88vh;overflow:auto;background:var(--surface);color:var(--ink);border-radius:18px 18px 0 0;padding:16px max(16px, env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));box-shadow:0 -8px 30px rgba(0,0,0,.25)}
@@ -886,6 +1116,15 @@ body.egg-open{overflow:hidden}
 .tx-n{min-width:0;font-weight:600}
 .tx-n small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
 .egg-tx li span:last-child{font-weight:700;white-space:nowrap}
+.egg-facts{margin-top:12px}
+.egg-fix{margin-top:22px;font-size:14px}
+.egg-fix summary{cursor:pointer;color:var(--muted)}
+.egg-fix form{display:grid;gap:6px;margin-top:10px}
+.egg-fix label{font-size:13px;color:var(--muted)}
+.egg-fix input{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;width:100%}
+.egg-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.egg-actions button{font:inherit;font-weight:700;border:0;border-radius:8px;padding:9px 14px;cursor:pointer;background:var(--board);color:var(--board-ink)}
+.egg-actions #egg-reset{background:var(--chip);color:var(--ink)}
 @media (prefers-reduced-motion: reduce){*{animation:none!important}}
 </style>
 </head>
@@ -1288,8 +1527,6 @@ body.egg-open{overflow:hidden}
   function pressEnd(fired) {
     if (!S.press) return;
     clearTimeout(S.press.timer);
-    clearTimeout(S.press.hint);
-    if (S.press.el) S.press.el.classList.remove('charging');
     S.press = null;
     if (fired) S.eggFired = true;
     if (S.renderLater) { var f = S.renderLater === true; S.renderLater = null; render(f); }
@@ -1301,7 +1538,6 @@ body.egg-open{overflow:hidden}
     S.eggFired = false;
     S.press = {
       el: el, id: el.dataset.m, x: e.clientX, y: e.clientY,
-      hint: setTimeout(function () { if (S.press) S.press.el.classList.add('charging'); }, 1500),
       timer: setTimeout(function () {
         var id = S.press && S.press.id;
         pressEnd(true);
@@ -1332,30 +1568,37 @@ body.egg-open{overflow:hidden}
     document.body.classList.remove('egg-open');
   }
   function renderEgg(f) {
-    var M = f.money;
+    S.egg = f;
+    var M = f.money, cal = f.calibration;
     var line = function (label, val, cls) {
       return '<li><span>' + label + '</span><span class="' + (cls || '') + '">' + val + '</span></li>';
     };
-    var ach = f.achievements
-      ? f.achievements.map(function (a) { return '<li><span>' + esc(a.name) + '</span><span>' + a.count + '×</span></li>'; }).join('')
-      : '';
+    var signed = function (n) { return (n >= 0 ? '+' : '') + money(n); };
+    var ach = (f.achievements || []).map(function (a) {
+      return '<li><span>' + esc(a.name) + (a.count > 1 ? ' ×' + a.count : '') + '</span><span class="plus">+' + money(a.amount) + '</span></li>';
+    }).join('');
     $('egg-body').innerHTML =
-      '<div class="egg-hero"><span class="egg-label">Kontostand, geschätzt</span>' +
+      '<div class="egg-hero"><span class="egg-label">Kontostand, ' + (cal ? 'hochgerechnet' : 'geschätzt') + '</span>' +
       '<span class="egg-money' + (M.estimate < 0 ? ' neg' : '') + '">' + money(M.estimate) + '</span></div>' +
       '<ul class="egg-calc">' +
-        line('Startbudget', money(M.start)) +
+        (cal ? line('Korrigierter Stand am ' + dmy(cal.at), money(cal.amount))
+             : line('Startbudget', money(M.start))) +
         line('Verkäufe (' + f.counts.sells + ')', '+' + money(M.sold), 'plus') +
         line('Käufe (' + f.counts.buys + ')', '−' + money(M.bought), 'minus') +
         line('Login-Bonus (' + M.loginDays + ' Tage × ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
-        line('Punkteprämie (' + pts(f.seasonPoints) + ' × ' + money(M.pointMoney) + ')', '+' + money(M.points), 'plus') +
+        line('Punkteprämie (' + money(M.pointMoney) + ' pro Punkt)', signed(M.points), M.points < 0 ? 'minus' : 'plus') +
+        line('Erfolgsprämien', '+' + money(M.achievements), 'plus') +
       '</ul>' +
-      '<p class="egg-note">Annahme: seit ' + dmy(f.since) + ' jeden Tag eingeloggt. Erfolgsprämien sind nicht drin, ' +
-        'die zeigt Kickbase nur dem Besitzer selbst.</p>' +
-      '<h3>Erfolge</h3><ul class="egg-calc">' +
+      '<p class="egg-note">' + (cal ? 'Seit der Korrektur am ' + dmy(cal.at) + ' weitergerechnet. ' : 'Ab Ligastart am ' + dmy(f.since) + ' gerechnet. ') +
+        'Annahme: jeden Tag eingeloggt. Erfolge sind aus Aufstellungen, Punkten, Toren und Transfers nachgerechnet.</p>' +
+      '<h3>Erfolge' + (cal ? ' seit der Korrektur' : '') + '</h3><ul class="egg-calc">' +
+        (ach || '<li><span>Keine</span><span></span></li>') +
+      '</ul>' +
+      '<ul class="egg-calc egg-facts">' +
         line('Platz in der Liga', f.placement || '–') +
         line('Spieltagssiege', f.matchdayWins == null ? '–' : f.matchdayWins) +
         line('Saisonpunkte', pts(f.seasonPoints) + (f.averagePoints ? ' (Ø ' + pts(f.averagePoints) + ')' : '')) +
-        line('Teamwert', money(f.teamValue)) + ach +
+        line('Teamwert', money(f.teamValue)) +
       '</ul>' +
       '<h3>Transfers</h3>' +
       (f.transfers.length ? '<ol class="egg-tx">' + f.transfers.map(function (t) {
@@ -1363,13 +1606,55 @@ body.egg-open{overflow:hidden}
         return '<li><span class="tx-d">' + dmy(t.date) + '</span><span class="tx-n">' + esc(t.player) +
           '<small>' + (buy ? 'gekauft' : 'verkauft') + (t.other ? (buy ? ' von ' : ' an ') + esc(t.other) : '') + '</small></span>' +
           '<span class="' + (buy ? 'minus' : 'plus') + '">' + (buy ? '−' : '+') + money(t.price) + '</span></li>';
-      }).join('') + '</ol>' : '<p class="egg-note">Noch keine Transfers.</p>');
+      }).join('') + '</ol>' : '<p class="egg-note">Noch keine Transfers.</p>') +
+      '<details class="egg-fix"><summary>Kontostand korrigieren</summary>' +
+        '<form id="egg-form" autocomplete="off">' +
+          '<label for="egg-amount">Echter Kontostand in €</label>' +
+          '<input id="egg-amount" inputmode="decimal" placeholder="z. B. -47.248.029" value="' + (cal ? cal.amount : '') + '">' +
+          '<label for="egg-at">Stand vom</label>' +
+          '<input id="egg-at" type="datetime-local" value="' + localInput(cal ? cal.at : null) + '">' +
+          '<label for="egg-key">Schlüssel</label>' +
+          '<input id="egg-key" type="password" value="' + esc(savedKey()) + '">' +
+          '<div class="egg-actions"><button type="submit">Speichern</button>' +
+          (cal ? '<button type="button" id="egg-reset">Korrektur löschen</button>' : '') + '</div>' +
+          '<p class="egg-note" id="egg-msg"></p>' +
+        '</form></details>';
   }
+
+  function localInput(iso) {
+    var d = iso ? new Date(iso) : new Date();
+    d = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+    return d.toISOString().slice(0, 16);
+  }
+  function savedKey() { try { return localStorage.getItem('bousching-key') || ''; } catch (_) { return ''; } }
+  function saveCal(amount) {
+    var key = $('egg-key').value.trim();
+    try { localStorage.setItem('bousching-key', key); } catch (_) {}
+    $('egg-msg').textContent = 'Speichere …';
+    var at = $('egg-at').value ? new Date($('egg-at').value).toISOString() : null;
+    var body = JSON.stringify({ id: S.egg.id, amount: amount, at: at });
+    var req = DEMO ? Promise.resolve({ ok: true, json: function () { return {}; } })
+      : fetch('/api/calibrate', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': key }, body: body });
+    req.then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (j) { throw new Error(j.error || 'Fehler ' + r.status); });
+      $('egg-msg').textContent = DEMO ? 'In der Demo wird nichts gespeichert.' : 'Gespeichert.';
+      if (!DEMO) return api('/api/manager', { id: S.egg.id }).then(renderEgg);
+    }).catch(function (e) { $('egg-msg').textContent = e.message; });
+  }
+  document.addEventListener('submit', function (e) {
+    if (e.target.id !== 'egg-form') return;
+    e.preventDefault();
+    var raw = $('egg-amount').value.replace(/\s|€/g, '').replace(/[−–]/g, '-').replace(/\./g, '').replace(',', '.');
+    var n = Number(raw);
+    if (raw === '' || !isFinite(n)) { $('egg-msg').textContent = 'Bitte einen Betrag eingeben, z. B. -47.248.029'; return; }
+    saveCal(Math.round(n));
+  });
 
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('egg').hidden) closeEgg(); });
 
   document.addEventListener('click', function (e) {
     if (e.target.id === 'egg' || (e.target.closest && e.target.closest('#egg-close'))) { closeEgg(); return; }
+    if (e.target.id === 'egg-reset') { saveCal(null); return; }
     var el = e.target.closest('button');
     if (!el) return;
     if (el.dataset.m) {
@@ -1510,12 +1795,15 @@ body.egg-open{overflow:hidden}
           var bought = tx.filter(function (x) { return x.kind === 'buy'; }).reduce(function (a, x) { return a + x.price; }, 0);
           var sold = tx.filter(function (x) { return x.kind === 'sell'; }).reduce(function (a, x) { return a + x.price; }, 0);
           var since = new Date(Date.now() - 60 * 86400000).toISOString(), sp = mg.official.season;
-          var M = { start: 50000000, sold: sold, bought: bought, loginDays: 61, loginBonus: 100000, login: 6100000, pointMoney: 1000, points: sp * 1000 };
-          M.estimate = M.start + sold - bought + M.login + M.points;
+          var achv = [{ name: 'Spieltagssieger', count: 2, amount: 2000000 }, { name: 'Kreisliga', count: 1, amount: 1000000 },
+            { name: 'Topscorer', count: 3, amount: 300000 }, { name: 'Bronzenes Händchen', count: 1, amount: 250000 }];
+          var M = { start: 50000000, sold: sold, bought: bought, loginDays: 61, loginBonus: 100000, login: 6100000, pointMoney: 1000, points: sp * 1000,
+            achievements: 3550000 };
+          M.estimate = M.start + sold - bought + M.login + M.points + M.achievements;
           return copy({ id: mg.id, name: mg.name, placement: mg.official.seasonRank, seasonPoints: sp, averagePoints: Math.round(sp / 10),
             matchdayWins: int(0, 3), teamValue: int(150, 300) * 1000000, since: since, money: M,
             counts: { buys: tx.filter(function (x) { return x.kind === 'buy'; }).length, sells: tx.filter(function (x) { return x.kind === 'sell'; }).length },
-            achievements: null, transfers: tx });
+            calibration: null, achievements: achv, transfers: tx });
         }
         return {};
       }
