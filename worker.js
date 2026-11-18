@@ -825,6 +825,39 @@ async function managerFile(kb, env, url) {
   });
 }
 
+// Transfermarkt: Spieler, Preis, Marktwert, Ablauf und Anzahl Gebote. Wer wie viel bietet, gibt Kickbase nicht heraus.
+async function market(kb, env) {
+  const league = await getLeague(kb, env);
+  return cached('mk:' + league.id, 60000, async () => {
+    const md = await matchdays(kb, league);
+    const rk = await cached('rk:' + league.id + ':' + num(md.day), 20000, () =>
+      kb.get('/v4/leagues/' + league.id + '/ranking', { dayNumber: num(md.day) }),
+    );
+    const names = {};
+    for (const u of rk.us || []) names[String(u.i)] = String(u.n || '').trim();
+    const mk = await kb.get('/v4/leagues/' + league.id + '/market');
+    const now = Date.now();
+    const players = (mk.it || [])
+      .map((p) => ({
+        id: String(p.i),
+        name: [p.fn, p.n].filter(Boolean).join(' ').trim(),
+        short: String(p.n || p.fn || '').trim(),
+        pos: POS[Number(p.pos)] || null,
+        teamId: str(p.tid),
+        price: num(p.prc),
+        value: num(p.mv),
+        trend: num(p.mvt),
+        points: num(p.p),
+        average: num(p.ap),
+        offers: Number(p.ofc) || 0,
+        ends: p.exs != null ? new Date(now + Number(p.exs) * 1000).toISOString() : null,
+        seller: p.u && names[String(p.u)] ? names[String(p.u)] : null,
+      }))
+      .sort((a, b) => b.offers - a.offers || String(a.ends).localeCompare(String(b.ends)));
+    return { players, updatedAt: new Date().toISOString() };
+  });
+}
+
 async function calibrate(kb, env, request) {
   let body = {};
   try {
@@ -942,6 +975,8 @@ export default {
           return json(await overview(kb, env, day));
         case '/api/players':
           return json(await playersEndpoint(kb, env, url));
+        case '/api/market':
+          return json(await market(kb, env));
         case '/api/manager':
           return json(await managerFile(kb, env, url));
         case '/api/leagues': {
@@ -1011,7 +1046,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
 
 .top{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:22px 0 14px}
-.top h1{margin:0;font-weight:800;font-stretch:72%;font-size:30px;line-height:1;letter-spacing:.01em}
+.top h1{margin:0;font-weight:800;font-stretch:72%;font-size:30px;line-height:1;letter-spacing:.01em;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 .dayline{display:flex;align-items:center;gap:2px;margin:6px 0 0 -8px;color:var(--muted);font-size:15px}
 .dayline button{border:0;background:none;cursor:pointer;width:36px;height:36px;border-radius:8px;font-size:22px;line-height:1;color:var(--ink)}
 .dayline button:disabled{opacity:.25;cursor:default}
@@ -1126,6 +1161,11 @@ body.egg-open{overflow:hidden}
 .tx-n small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
 .egg-tx li span:last-child{font-weight:700;white-space:nowrap}
 .egg-facts{margin-top:12px}
+.egg-tx.mk li{grid-template-columns:34px 1fr auto}
+.mk-n{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:22px;color:var(--muted);text-align:center}
+.mk-n.hot{color:var(--live)}
+.mk-p{text-align:right;font-weight:700;white-space:nowrap}
+.mk-p small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
 .egg-debt{margin-top:10px;border-top:2px solid var(--line)}
 .egg-fix{margin-top:22px;font-size:14px}
 .egg-fix summary{cursor:pointer;color:var(--muted)}
@@ -1541,17 +1581,17 @@ body.egg-open{overflow:hidden}
     if (S.renderLater) { var f = S.renderLater === true; S.renderLater = null; render(f); }
   }
   document.addEventListener('pointerdown', function (e) {
-    var el = e.target.closest && e.target.closest('.mrow');
+    var el = e.target.closest && e.target.closest('.mrow, #league');
     if (!el || (e.pointerType === 'mouse' && e.button !== 0)) return;
     pressEnd(false);
     S.eggFired = false;
     S.press = {
-      el: el, id: el.dataset.m, x: e.clientX, y: e.clientY,
+      el: el, id: el.dataset.m || null, x: e.clientX, y: e.clientY,
       timer: setTimeout(function () {
         var id = S.press && S.press.id;
         pressEnd(true);
         if (navigator.vibrate) { try { navigator.vibrate([30, 40, 60]); } catch (_) {} }
-        openEgg(id);
+        if (id) openEgg(id); else openMarket();
       }, HOLD)
     };
   });
@@ -1559,7 +1599,36 @@ body.egg-open{overflow:hidden}
     if (S.press && Math.abs(e.clientX - S.press.x) + Math.abs(e.clientY - S.press.y) > 14) pressEnd(false);
   });
   ['pointerup', 'pointercancel'].forEach(function (t) { document.addEventListener(t, function () { pressEnd(false); }); });
-  document.addEventListener('contextmenu', function (e) { if (e.target.closest && e.target.closest('.mrow')) e.preventDefault(); });
+  document.addEventListener('contextmenu', function (e) { if (e.target.closest && e.target.closest('.mrow, #league')) e.preventDefault(); });
+
+  function openMarket() {
+    $('egg-title').textContent = 'Transfermarkt';
+    $('egg-body').innerHTML = '<p class="egg-note">Lade den Markt …</p>';
+    $('egg').hidden = false;
+    document.body.classList.add('egg-open');
+    $('egg-close').focus();
+    api('/api/market').then(renderMarket, function (e) {
+      $('egg-body').innerHTML = '<p class="egg-note">' + esc(e.message) + '</p>';
+    });
+  }
+  function left(iso) {
+    var ms = Date.parse(iso || '') - Date.now();
+    if (!(ms > 0)) return 'läuft ab';
+    var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    return h >= 24 ? 'noch ' + Math.floor(h / 24) + ' T ' + (h % 24) + ' Std' : h ? 'noch ' + h + ' Std ' + m + ' Min' : 'noch ' + m + ' Min';
+  }
+  function renderMarket(mk) {
+    var list = mk.players || [];
+    var withBids = list.filter(function (p) { return p.offers > 0; }).length;
+    $('egg-body').innerHTML =
+      '<p class="egg-note">' + list.length + ' Spieler auf dem Markt, ' + withBids + ' davon mit Geboten. ' +
+      'Wer bietet und wie viel, verrät Kickbase nicht.</p>' +
+      (list.length ? '<ol class="egg-tx mk">' + list.map(function (p) {
+        return '<li><span class="mk-n' + (p.offers ? ' hot' : '') + '">' + p.offers + '</span>' +
+          '<span class="tx-n">' + esc(p.name) + '<small>' + [p.pos, p.seller ? 'von ' + esc(p.seller) : null, left(p.ends)].filter(Boolean).join(', ') + '</small></span>' +
+          '<span class="mk-p">' + money(p.price) + '<small>' + (p.offers === 1 ? '1 Gebot' : p.offers + ' Gebote') + '</small></span></li>';
+      }).join('') + '</ol>' : '<p class="egg-note">Gerade ist niemand auf dem Markt.</p>');
+  }
 
   function openEgg(id) {
     var m = S.ov && S.ov.managers.filter(function (x) { return x.id === id; })[0];
@@ -1795,6 +1864,12 @@ body.egg-open{overflow:hidden}
           var out = {};
           String(params.ids || '').split(',').forEach(function (id) { if (live[id]) out[id] = live[id]; });
           return copy({ day: 11, players: out });
+        }
+        if (path === '/api/market') {
+          return copy({ players: SUR.slice(0, 9).map(function (n, k) {
+            return { id: 'm' + k, name: n, pos: ['TW', 'ABW', 'MF', 'ST'][k % 4], price: int(5, 250) * 100000, offers: [3, 2, 2, 1, 1, 0, 0, 0, 0][k],
+              ends: new Date(Date.now() + int(20, 2800) * 60000).toISOString(), seller: k === 2 ? 'Toni' : null };
+          }) });
         }
         if (path === '/api/manager') {
           var mg = managers.filter(function (x) { return x.id === params.id; })[0];
