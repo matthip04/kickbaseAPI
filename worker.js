@@ -1101,7 +1101,7 @@ body.egg-open{overflow:hidden}
 #egg-close{border:0;background:var(--chip);width:36px;height:36px;border-radius:50%;font-size:22px;line-height:1;cursor:pointer}
 .egg-hero{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:6px 0 14px}
 .egg-label{font-size:13px;color:var(--muted)}
-.egg-money{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:34px;line-height:1;color:var(--board-ink);background:var(--board);padding:10px 12px 8px;border-radius:10px}
+.egg-money{font-family:"Doto","Archivo",monospace;font-weight:900;font-size:clamp(22px,7.5vw,34px);max-width:100%;line-height:1;color:var(--board-ink);background:var(--board);padding:10px 12px 8px;border-radius:10px}
 .egg-money.neg{color:#ff9a8c}
 .egg h3{margin:18px 0 6px;font-size:15px}
 .egg-calc,.egg-tx{list-style:none;margin:0;padding:0}
@@ -1517,7 +1517,6 @@ body.egg-open{overflow:hidden}
   function money(n) {
     if (n == null || isNaN(n)) return '–';
     var a = Math.abs(n), s = n < 0 ? '−' : '';
-    if (a >= 1e6) return s + (a / 1e6).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' Mio. €';
     return s + Math.round(a).toLocaleString('de-DE') + ' €';
   }
   function dmy(iso) {
