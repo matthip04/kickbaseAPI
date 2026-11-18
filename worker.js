@@ -688,7 +688,8 @@ async function ledger(kb, env, league, uid) {
 
   add(since, 'start', 'Startbudget', start);
   for (const x of txs) add(Date.parse(x.date), x.kind, x.player, x.kind === 'sell' ? x.price : -x.price);
-  for (let t = since, k = 0; t <= now && k < 1000; t += 86400000, k++) add(t, 'login', 'Login-Bonus', loginBonus);
+  // Login-Bonus steigt mit der Anzahl Logins: 10.000 €, 20.000 €, … ab dem 10. Login 100.000 € pro Tag
+  for (let t = since, k = 1; t <= now && k < 1000; t += 86400000, k++) add(t, 'login', 'Login-Bonus', Math.min(k, 10) * (loginBonus / 10));
 
   // Spieltage der Saison (nur abgeschlossene, an denen die Liga schon lief)
   const season = (perf.it && perf.it[0] && perf.it[0].it) || [];
@@ -782,6 +783,8 @@ async function managerFile(kb, env, url) {
     const base = cal ? Number(cal.amount) : 0;
     const estimate = base + used.reduce((s, e) => s + e.amount, 0);
     const d = L.dash;
+    // Kickbase erlaubt höchstens 33 % des Teamwerts im Minus
+    const maxDebt = -Math.round(0.33 * (num(d.tv) || 0));
     return {
       id: uid,
       name: String(d.unm || L.user.n || '').trim(),
@@ -803,6 +806,8 @@ async function managerFile(kb, env, url) {
         points: sum('points'),
         achievements: sum('ach'),
         estimate,
+        maxDebt,
+        room: estimate - maxDebt,
       },
       counts: { buys: count('buy'), sells: count('sell') },
       achievements: Object.values(achList).sort((a, b) => b.amount - a.amount),
@@ -1117,6 +1122,7 @@ body.egg-open{overflow:hidden}
 .tx-n small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
 .egg-tx li span:last-child{font-weight:700;white-space:nowrap}
 .egg-facts{margin-top:12px}
+.egg-debt{margin-top:10px;border-top:2px solid var(--line)}
 .egg-fix{margin-top:22px;font-size:14px}
 .egg-fix summary{cursor:pointer;color:var(--muted)}
 .egg-fix form{display:grid;gap:6px;margin-top:10px}
@@ -1584,10 +1590,14 @@ body.egg-open{overflow:hidden}
              : line('Startbudget', money(M.start))) +
         line('Verkäufe (' + f.counts.sells + ')', '+' + money(M.sold), 'plus') +
         line('Käufe (' + f.counts.buys + ')', '−' + money(M.bought), 'minus') +
-        line('Login-Bonus (' + M.loginDays + ' Tage × ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
+        line('Login-Bonus (' + M.loginDays + ' Tage, ab Tag 10 je ' + money(M.loginBonus) + ')', '+' + money(M.login), 'plus') +
         line('Punkteprämie (' + money(M.pointMoney) + ' pro Punkt)', signed(M.points), M.points < 0 ? 'minus' : 'plus') +
         line('Erfolgsprämien', '+' + money(M.achievements), 'plus') +
       '</ul>' +
+      (M.maxDebt != null ? '<ul class="egg-calc egg-debt">' +
+        line('Max. Minus (33 % vom Teamwert)', money(M.maxDebt), 'minus') +
+        line('Spielraum für Käufe/Gebote', money(Math.max(0, M.room)), M.room > 0 ? 'plus' : 'minus') +
+      '</ul>' : '') +
       '<p class="egg-note">' + (cal ? 'Seit der Korrektur am ' + dmy(cal.at) + ' weitergerechnet. ' : 'Ab Ligastart am ' + dmy(f.since) + ' gerechnet. ') +
         'Annahme: jeden Tag eingeloggt. Erfolge sind aus Aufstellungen, Punkten, Toren und Transfers nachgerechnet.</p>' +
       '<h3>Erfolge' + (cal ? ' seit der Korrektur' : '') + '</h3><ul class="egg-calc">' +
@@ -1799,6 +1809,8 @@ body.egg-open{overflow:hidden}
           var M = { start: 50000000, sold: sold, bought: bought, loginDays: 61, loginBonus: 100000, login: 6100000, pointMoney: 1000, points: sp * 1000,
             achievements: 3550000 };
           M.estimate = M.start + sold - bought + M.login + M.points + M.achievements;
+          var tvv = int(150, 300) * 1000000;
+          M.maxDebt = -Math.round(tvv * 0.33); M.room = M.estimate - M.maxDebt;
           return copy({ id: mg.id, name: mg.name, placement: mg.official.seasonRank, seasonPoints: sp, averagePoints: Math.round(sp / 10),
             matchdayWins: int(0, 3), teamValue: int(150, 300) * 1000000, since: since, money: M,
             counts: { buys: tx.filter(function (x) { return x.kind === 'buy'; }).length, sells: tx.filter(function (x) { return x.kind === 'sell'; }).length },
